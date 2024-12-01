@@ -1,0 +1,194 @@
+
+#include <HTTPClient.h>
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include <spo2_algorithm.h>
+MAX30105 particleSensor;
+
+const byte RATE_SIZE = 4;  //Increase this for more averaging. 4 is good.
+byte rates[RATE_SIZE];     //Array of heart rates
+byte rateSpot = 0;
+long lastBeat = 0;  //Time at which the last beat occurred
+
+float beatsPerMinute;  //Current BPM value
+int beatAvg;      
+
+
+
+#define REMOTEXY_MODE__WIFI_POINT
+
+#include <WiFi.h>
+
+// RemoteXY connection settings 
+#define REMOTEXY_WIFI_SSID "Derma"
+#define REMOTEXY_WIFI_PASSWORD "12345678"
+#define REMOTEXY_SERVER_PORT 6377
+
+
+#include <RemoteXY.h>
+
+// RemoteXY GUI configuration  
+#pragma pack(push, 1)  
+uint8_t RemoteXY_CONF[] =   // 38 bytes
+  { 255,0,0,8,0,31,0,19,0,0,0,0,31,1,106,200,1,1,2,0,
+  67,18,13,62,13,78,2,26,2,67,19,48,60,15,78,2,26,2 };
+  
+// this structure defines all the variables and events of your control interface 
+struct {
+
+    // output variables
+  float value_01;
+  float value_02;
+
+    // other variable
+  uint8_t connect_flag;  // =1 if wire connected, else =0
+
+} RemoteXY;   
+#pragma pack(pop)
+ 
+ #include<SPI.h>
+#include<SD.h>
+File baymaxtxt ;
+const int chipSelect = 5;
+
+
+#include <WiFiClient.h>
+#include <UrlEncode.h>
+
+const char* ssid = "POCO F3";
+const char* password = "1234567890";
+
+// +international_country_code + phone number
+// Portugal +351, example: +351912345678
+String phoneNumber = "201009026682";
+String apiKey = "8325400";
+
+void sendMessage(String message){
+
+  // Data to send with HTTP POST
+  String url = "http://api.callmebot.com/whatsapp.php?phone=" + phoneNumber + "&apikey=" + apiKey + "&text=" + urlEncode(message);
+  WiFiClient client;    
+  HTTPClient http;
+  http.begin(client, url);
+
+  // Specify content-type header
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  
+  // Send HTTP POST request
+  int httpResponseCode = http.POST(url);
+  if (httpResponseCode == 200){
+    Serial.print("Message sent successfully");
+  }
+  else{
+    Serial.println("Error sending the message");
+    Serial.print("HTTP response code: ");
+    Serial.println(httpResponseCode);
+  }
+
+  // Free resources
+  http.end();
+}
+
+
+void setup() {
+  
+  Serial.begin(115200);
+  Serial.println("Initializing...");
+RemoteXY_Init (); 
+  pinMode(4,OUTPUT);
+  // Initialize sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST))  //Use default I2C port, 400kHz speed
+  {
+    Serial.println("MAX30102 was not found. Please check wiring/power. ");
+    while (1) ; //Infinite loop to stop the program
+  }
+  Serial.println("Place your index finger on the sensor with steady pressure.");
+
+  particleSensor.setup();                     //Configure sensor with default settings
+  particleSensor.setPulseAmplitudeRed(0x0A);  //Turn Red LED to low to indicate sensor is running
+  particleSensor.setPulseAmplitudeGreen(0);   //Turn off Green LED
+
+  if (!SD.begin(5)) {
+    Serial.println("SD failed");
+    return;
+  }
+  Serial.println("SD card ok");
+
+  // فتح أو إنشاء الملف لتخزين البيانات
+  baymaxtxt = SD.open("baymax.txt", FILE_WRITE);
+  if (!baymaxtxt) {
+    Serial.println("Error opening file!");
+    return;
+  }
+
+   WiFi.begin(ssid, password);
+  Serial.println("Connecting");
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.print("Connected to WiFi network with IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Send Message to WhatsAPP
+  sendMessage("Hello from ESP8266!");
+  
+}
+
+void loop() {
+  RemoteXY_Handler ();
+  long irValue = particleSensor.getIR();
+
+  if (checkForBeat(irValue) == true) {
+    //Calculate beatsPerMinute
+    long delta = millis() - lastBeat;
+    lastBeat = millis();
+    beatsPerMinute = 60 / (delta / 1000.0);
+
+    if (beatsPerMinute < 255 && beatsPerMinute > 20) {  //Check if the BPM value is within a valid range
+      rates[rateSpot++] = (byte)beatsPerMinute;         //Store this reading in the array
+      rateSpot %= RATE_SIZE;                            //Wrap variable
+
+      //Take average of readings
+      beatAvg = 0;
+      for (byte x = 0; x < RATE_SIZE; x++)
+        beatAvg += rates[x];
+      beatAvg /= RATE_SIZE;
+    }
+  }
+ 
+
+  //Print the IR value, current BPM value, and average BPM value to the serial monitor
+  Serial.print("IR=");
+  Serial.print(irValue);
+  Serial.print(", BPM=");
+  Serial.print(beatsPerMinute);
+  Serial.print(", Avg BPM=");
+  Serial.print(beatAvg);
+  Serial.println();
+ RemoteXY.value_01 = beatAvg;
+    RemoteXY.value_02 = 0;
+      baymaxtxt.print(", Avg BPM= ");
+    baymaxtxt.print(beatAvg);
+    baymaxtxt.print(" bpm, SpO2: ");
+    baymaxtxt.println(0);
+    baymaxtxt.println();  // إضافة سطر جديد بين القراءات المختلفة
+baymaxtxt.close();  
+
+  if (irValue < 50000){
+    Serial.print(" No finger?");
+ digitalWrite(4,LOW);
+  Serial.println();
+
+  }else{
+ if(beatAvg > 95 || beatAvg  < 45){
+  digitalWrite(4,HIGH);
+   sendMessage("there is heart attack possibilty");
+
+ }
+
+  }
+  
+}
